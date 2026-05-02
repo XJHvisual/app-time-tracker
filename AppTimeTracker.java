@@ -180,7 +180,8 @@ public class AppTimeTracker {
                 int sessions = rs.getInt("sessions");
                 grandTotal += secs;
 
-                System.out.printf("%-4d %-30s %12s %10d\n", rank++, app, formatDuration(secs), sessions);
+                String displayName = getFriendlyName(app);
+                System.out.printf("%-4d %-30s %12s %10d\n", rank++, displayName, formatDuration(secs), sessions);
             }
 
             System.out.println(String.join("", Collections.nCopies(60, "-")));
@@ -221,7 +222,8 @@ public class AppTimeTracker {
                 String lastUsed = rs.getString("last_used");
                 grandTotal += secs;
 
-                System.out.printf("%-4d %-25s %12s %8d %12s\n", rank++, app, formatDuration(secs), sessions, lastUsed);
+                String displayName = getFriendlyName(app);
+                System.out.printf("%-4d %-25s %12s %8d %12s\n", rank++, displayName, formatDuration(secs), sessions, lastUsed);
             }
 
             System.out.println(String.join("", Collections.nCopies(70, "-")));
@@ -328,7 +330,8 @@ public class AppTimeTracker {
                 int sessions = rs.getInt("sessions");
                 grandTotal += secs;
 
-                System.out.printf("%-4d %-30s %12s %10d\n", rank++, app, formatDuration(secs), sessions);
+                String displayName = getFriendlyName(app);
+                System.out.printf("%-4d %-30s %12s %10d\n", rank++, displayName, formatDuration(secs), sessions);
             }
 
             System.out.println(String.join("", Collections.nCopies(60, "-")));
@@ -379,7 +382,8 @@ public class AppTimeTracker {
                     long secs = rs.getLong("total_secs");
                     int sessions = rs.getInt("sessions");
                     grandTotal += secs;
-                    writer.printf("%-4d %-30s %12s %10d\n", rank++, app, formatDuration(secs), sessions);
+                    String displayName = getFriendlyName(app);
+                    writer.printf("%-4d %-30s %12s %10d\n", rank++, displayName, formatDuration(secs), sessions);
                 }
 
                 writer.println(String.join("", Collections.nCopies(60, "-")));
@@ -536,6 +540,23 @@ public class AppTimeTracker {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * Map process names to friendly display names.
+     * Returns the friendly name if found, otherwise returns original.
+     */
+    private static String getFriendlyName(String appName) {
+        if (appName == null) return null;
+        
+        String lower = appName.toLowerCase();
+        
+        // 鸣潮 - UE4/UE5 game
+        if (lower.equals("client-win64-shipping") || lower.equals("krwebview")) {
+            return "鸣潮";
+        }
+        
+        return appName;
     }
 
     private static boolean shouldIgnore(String appName) {
