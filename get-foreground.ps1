@@ -14,5 +14,9 @@ $procId = 0
 [Win32Helper]::GetWindowThreadProcessId($hwnd, [ref]$procId) | Out-Null
 if ($procId -gt 0) {
     $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
-    if ($proc) { $proc.ProcessName }
+    if ($proc) {
+        $path = ""
+        try { $path = $proc.Path } catch {}
+        "$($proc.ProcessName)|$path"
+    }
 }
