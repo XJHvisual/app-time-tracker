@@ -34,6 +34,11 @@ public class AppTimeTracker {
         String baseDir = getBaseDir();
         initDb(baseDir);
 
+        // Auto-start tracking immediately
+        startTrackingBackground(baseDir);
+        System.out.println("[Auto] Tracking started on launch.");
+        System.out.println();
+
         java.io.BufferedReader br = new java.io.BufferedReader(
             new java.io.InputStreamReader(System.in));
 
@@ -43,7 +48,7 @@ public class AppTimeTracker {
             if (trackingActive) System.out.println("  [TRACKING ACTIVE]");
             System.out.println("========================================");
             System.out.println();
-            System.out.println("  [1] " + (trackingActive ? "Stop tracking" : "Start tracking"));
+            System.out.println("  [1] Stop tracking");
             System.out.println("  [2] View today's statistics");
             System.out.println("  [3] View this week's statistics");
             System.out.println("  [4] View this month's statistics");
