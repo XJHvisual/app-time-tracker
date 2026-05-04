@@ -8,7 +8,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Windows Foreground Window Time Tracker v5.0
- * Background tracker — auto-starts on launch, runs until Ctrl+C.
+ * Background tracker 鈥?auto-starts on launch, runs until Ctrl+C.
  * All stats viewing is now handled by the GUI version (AppTimeTrackerGUI).
  *
  * DB: data/usagelog.db (shared with GUI)
@@ -155,7 +155,10 @@ public class AppTimeTracker {
             process.waitFor(10, TimeUnit.SECONDS);
             if (process.isAlive()) process.destroyForcibly();
 
-            return (line != null) ? line.trim() : null;
+            if (line == null) return null;
+            line = line.trim();
+            int pipe = line.indexOf('|');
+            return (pipe >= 0) ? line.substring(0, pipe) : line;
         } catch (Exception e) {
             return null;
         }
