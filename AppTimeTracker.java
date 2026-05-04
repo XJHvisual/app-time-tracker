@@ -45,18 +45,17 @@ public class AppTimeTracker {
         while (true) {
             System.out.println("========================================");
             System.out.println("  AppTimeTracker v4.4");
-            if (trackingActive) System.out.println("  [TRACKING ACTIVE]");
+            System.out.println("  [TRACKING]");
             System.out.println("========================================");
             System.out.println();
-            System.out.println("  [1] Stop tracking");
-            System.out.println("  [2] View today's statistics");
-            System.out.println("  [3] View this week's statistics");
-            System.out.println("  [4] View this month's statistics");
-            System.out.println("  [5] View all-time statistics");
-            System.out.println("  [6] Export report to file");
+            System.out.println("  [1] View today's statistics");
+            System.out.println("  [2] View this week's statistics");
+            System.out.println("  [3] View this month's statistics");
+            System.out.println("  [4] View all-time statistics");
+            System.out.println("  [5] Export report to file");
             System.out.println("  [0] Exit");
             System.out.println();
-            System.out.print("Choose option (0-6): ");
+            System.out.print("Choose option (0-5): ");
 
             String choice = null;
             try {
@@ -76,27 +75,18 @@ public class AppTimeTracker {
                     closeDb();
                     return;
                 case "1":
-                    if (trackingActive) {
-                        stopTracking(baseDir);
-                        System.out.println("Tracking stopped.\n");
-                    } else {
-                        startTrackingBackground(baseDir);
-                        System.out.println("Tracking started in background.\n");
-                    }
-                    break;
-                case "2":
                     generateDailyReport(baseDir, LocalDate.now().toString());
                     break;
-                case "3":
+                case "2":
                     generateRangeReport(baseDir, getThisWeekRange());
                     break;
-                case "4":
+                case "3":
                     generateRangeReport(baseDir, getThisMonthRange());
                     break;
-                case "5":
+                case "4":
                     generateAllTimeReport(baseDir);
                     break;
-                case "6":
+                case "5":
                     exportReportMenu(baseDir);
                     break;
                 default:
