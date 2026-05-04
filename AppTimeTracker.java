@@ -7,12 +7,11 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Windows Foreground Window Time Tracker v4.4
- * Uses SQLite to record each app usage session.
- * Each app switch creates one record: app_name, start, end, duration.
- * Tracking runs in background thread, menu stays interactive.
+ * Windows Foreground Window Time Tracker v5.0
+ * Background tracker — auto-starts on launch, runs until Ctrl+C.
+ * All stats viewing is now handled by the GUI version (AppTimeTrackerGUI).
  *
- * DB: data/usagelog.db (auto-created)
+ * DB: data/usagelog.db (shared with GUI)
  * Table: usage_log (id, app_name, start_time, end_time, duration_sec)
  */
 public class AppTimeTracker {
@@ -34,65 +33,24 @@ public class AppTimeTracker {
         String baseDir = getBaseDir();
         initDb(baseDir);
 
-        // Auto-start tracking immediately
+        // Auto-start tracking
         startTrackingBackground(baseDir);
         System.out.println("[Auto] Tracking started on launch.");
+        System.out.println("Press Ctrl+C to stop.");
         System.out.println();
 
-        java.io.BufferedReader br = new java.io.BufferedReader(
-            new java.io.InputStreamReader(System.in));
-
-        while (true) {
-            System.out.println("========================================");
-            System.out.println("  AppTimeTracker v4.4");
-            System.out.println("  [TRACKING]");
-            System.out.println("========================================");
+        // Register shutdown hook for clean exit on Ctrl+C
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println();
-            System.out.println("  [1] View today's statistics");
-            System.out.println("  [2] View this week's statistics");
-            System.out.println("  [3] View this month's statistics");
-            System.out.println("  [4] View all-time statistics");
-            System.out.println("  [5] Export report to file");
-            System.out.println("  [0] Exit");
-            System.out.println();
-            System.out.print("Choose option (0-5): ");
+            stopTracking(baseDir);
+            closeDb();
+            System.out.println("Tracking stopped. Bye!");
+        }));
 
-            String choice = null;
-            try {
-                String line = br.readLine();
-                if (line != null) choice = line.trim();
-            } catch (java.io.IOException ignored) {}
-
-            if (choice == null || choice.isEmpty()) {
-                System.out.println("Invalid input.\n");
-                continue;
-            }
-
-            switch (choice) {
-                case "0":
-                    stopTracking(baseDir);
-                    System.out.println("Bye!");
-                    closeDb();
-                    return;
-                case "1":
-                    generateDailyReport(baseDir, LocalDate.now().toString());
-                    break;
-                case "2":
-                    generateRangeReport(baseDir, getThisWeekRange());
-                    break;
-                case "3":
-                    generateRangeReport(baseDir, getThisMonthRange());
-                    break;
-                case "4":
-                    generateAllTimeReport(baseDir);
-                    break;
-                case "5":
-                    exportReportMenu(baseDir);
-                    break;
-                default:
-                    System.out.println("Invalid choice.\n");
-            }
-        }
+        // Wait until tracking thread exits
+        try {
+            trackingThread.join();
+        } catch (InterruptedException ignored) {}
     }
 
     private static void startTrackingBackground(String baseDir) {
@@ -122,331 +80,6 @@ public class AppTimeTracker {
         flushCurrentApp(baseDir);
     }
 
-    private static void startTracking(String baseDir) {
-        // Legacy: direct tracking mode (blocking)
-        System.out.println();
-        System.out.println("Press Ctrl+C to stop and exit");
-        System.out.println("Tracking started...\n");
-
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            flushCurrentApp(baseDir);
-            closeDb();
-            System.out.println("\nDatabase closed. Bye!");
-        }));
-
-        while (true) {
-            try {
-                trackForeground(baseDir);
-                Thread.sleep(SCAN_INTERVAL_SECONDS * 1000);
-            } catch (InterruptedException e) {
-                break;
-            }
-        }
-    }
-
-    private static void generateReport(String baseDir) {
-        generateAllTimeReport(baseDir);
-    }
-
-    private static void generateDailyReport(String baseDir, String date) {
-
-
-        String sql = "SELECT app_name, SUM(duration_sec) as total_secs, COUNT(*) as sessions " +
-                     "FROM usage_log WHERE date(start_time) = ? " +
-                     "GROUP BY app_name ORDER BY total_secs DESC";
-
-        try (PreparedStatement ps = dbConn.prepareStatement(sql)) {
-            ps.setString(1, date);
-            ResultSet rs = ps.executeQuery();
-
-            long grandTotal = 0;
-            int rank = 1;
-
-            System.out.printf("%-4s %-30s %12s %10s\n", "Rank", "Application", "Duration", "Sessions");
-            System.out.println(String.join("", Collections.nCopies(60, "-")));
-
-            while (rs.next()) {
-                String app = rs.getString("app_name");
-                if (shouldIgnore(app)) {
-
-                    continue;
-                }
-                long secs = rs.getLong("total_secs");
-                int sessions = rs.getInt("sessions");
-                grandTotal += secs;
-
-                String displayName = getFriendlyName(app);
-                System.out.printf("%-4d %-30s %12s %10d\n", rank++, displayName, formatDuration(secs), sessions);
-            }
-
-            System.out.println(String.join("", Collections.nCopies(60, "-")));
-            System.out.printf("%-4s %-30s %12s\n", "", "TOTAL", formatDuration(grandTotal));
-
-            if (rank == 1) {
-                System.out.println("\nNo data for this date.");
-            }
-
-        } catch (SQLException e) {
-            System.err.println("Report failed: " + e.getMessage());
-        }
-
-        System.out.println();
-    }
-
-    private static void generateAllTimeReport(String baseDir) {
-        System.out.println("\n========== All-Time Statistics ==========\n");
-
-        String sql = "SELECT app_name, SUM(duration_sec) as total_secs, COUNT(*) as sessions, " +
-                     "MAX(date(start_time)) as last_used " +
-                     "FROM usage_log GROUP BY app_name ORDER BY total_secs DESC LIMIT 20";
-
-        try (Statement stmt = dbConn.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-
-            long grandTotal = 0;
-            int rank = 1;
-
-            System.out.printf("%-4s %-25s %12s %8s %12s\n", "Rank", "Application", "Duration", "Sessions", "Last Used");
-            System.out.println(String.join("", Collections.nCopies(70, "-")));
-
-            while (rs.next()) {
-                String app = rs.getString("app_name");
-                if (shouldIgnore(app)) continue;
-                long secs = rs.getLong("total_secs");
-                int sessions = rs.getInt("sessions");
-                String lastUsed = rs.getString("last_used");
-                grandTotal += secs;
-
-                String displayName = getFriendlyName(app);
-                System.out.printf("%-4d %-25s %12s %8d %12s\n", rank++, displayName, formatDuration(secs), sessions, lastUsed);
-            }
-
-            System.out.println(String.join("", Collections.nCopies(70, "-")));
-            System.out.printf("%-4s %-25s %12s\n", "", "TOTAL", formatDuration(grandTotal));
-
-            // Summary stats
-            System.out.println("\n========== Summary ==========");
-            try (ResultSet summary = stmt.executeQuery("SELECT COUNT(DISTINCT date(start_time)) as days, " +
-                    "COUNT(*) as total_sessions, SUM(duration_sec) as total_time FROM usage_log")) {
-                if (summary.next()) {
-                    System.out.println("Active days:     " + summary.getInt("days"));
-                    System.out.println("Total sessions:  " + summary.getInt("total_sessions"));
-                    System.out.println("Total time:      " + formatDuration(summary.getLong("total_time")));
-                }
-            }
-
-        } catch (SQLException e) {
-            System.err.println("Report failed: " + e.getMessage());
-        }
-
-        System.out.println();
-    }
-
-    private static void exportReportMenu(String baseDir) {
-        System.out.println();
-        System.out.println("  [1] Export today's report");
-        System.out.println("  [2] Export this week's report");
-        System.out.println("  [3] Export this month's report");
-        System.out.println("  [4] Export all-time report");
-        System.out.println();
-        System.out.print("Choose (1-4): ");
-
-        Scanner scanner = new Scanner(System.in);
-        String choice = scanner.nextLine().trim();
-        String title;
-        String dateCondition;
-
-        switch (choice) {
-            case "1":
-                title = "Daily Report - " + LocalDate.now();
-                dateCondition = "WHERE date(start_time) = '" + LocalDate.now().toString() + "'";
-                break;
-            case "2": {
-                String[] range = getThisWeekRange();
-                title = "Weekly Report - " + range[0] + " to " + range[1];
-                dateCondition = "WHERE date(start_time) >= '" + range[0] + "' AND date(start_time) <= '" + range[1] + "'";
-                break;
-            }
-            case "4": {
-                title = "All-Time Report";
-                dateCondition = "";
-                break;
-            }
-            default:
-            case "3": {
-                String[] range = getThisMonthRange();
-                title = "Monthly Report - " + range[0].substring(0, 7);
-                dateCondition = "WHERE date(start_time) >= '" + range[0] + "' AND date(start_time) <= '" + range[1] + "'";
-                break;
-            }
-        }
-        exportReportToFile(baseDir, title, dateCondition);
-    }
-
-    private static String[] getThisWeekRange() {
-        LocalDate today = LocalDate.now();
-        LocalDate monday = today.with(DayOfWeek.MONDAY);
-        LocalDate sunday = today.with(DayOfWeek.SUNDAY);
-        return new String[]{monday.toString(), sunday.toString()};
-    }
-
-    private static String[] getThisMonthRange() {
-        LocalDate today = LocalDate.now();
-        LocalDate first = today.withDayOfMonth(1);
-        LocalDate last = today.withDayOfMonth(today.lengthOfMonth());
-        return new String[]{first.toString(), last.toString()};
-    }
-
-    private static void generateRangeReport(String baseDir, String[] range) {
-        String label = range[0] + " to " + range[1];
-        System.out.println("\n========== Report: " + label + " ==========\n");
-
-        String sql = "SELECT app_name, SUM(duration_sec) as total_secs, COUNT(*) as sessions " +
-                     "FROM usage_log WHERE date(start_time) >= ? AND date(start_time) <= ? " +
-                     "GROUP BY app_name ORDER BY total_secs DESC";
-
-        try (PreparedStatement ps = dbConn.prepareStatement(sql)) {
-            ps.setString(1, range[0]);
-            ps.setString(2, range[1]);
-            ResultSet rs = ps.executeQuery();
-
-            long grandTotal = 0;
-            int rank = 1;
-
-            System.out.printf("%-4s %-30s %12s %10s\n", "Rank", "Application", "Duration", "Sessions");
-            System.out.println(String.join("", Collections.nCopies(60, "-")));
-
-            while (rs.next()) {
-                String app = rs.getString("app_name");
-                boolean ignored = shouldIgnore(app);
-
-                if (ignored) continue;  // skip ignored apps in report
-                long secs = rs.getLong("total_secs");
-                int sessions = rs.getInt("sessions");
-                grandTotal += secs;
-
-                String displayName = getFriendlyName(app);
-                System.out.printf("%-4d %-30s %12s %10d\n", rank++, displayName, formatDuration(secs), sessions);
-            }
-
-            System.out.println(String.join("", Collections.nCopies(60, "-")));
-            System.out.printf("%-4s %-30s %12s\n", "", "TOTAL", formatDuration(grandTotal));
-
-            if (rank == 1) {
-                System.out.println("\nNo data for this period.");
-            }
-
-        } catch (SQLException e) {
-            System.err.println("Report failed: " + e.getMessage());
-        }
-
-        System.out.println();
-    }
-
-    private static void exportReportToFile(String baseDir) {
-        // kept for --report backward compat
-        generateAllTimeReport(baseDir);
-    }
-
-    private static void exportReportToFile(String baseDir, String title, String dateCondition) {
-        String dateStr = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
-        String filename = "report_" + dateStr + ".txt";
-        File reportFile = new File(baseDir, DATA_DIR + "/" + filename);
-
-        try (PrintWriter writer = new PrintWriter(reportFile, "UTF-8")) {
-            writer.println("========================================");
-            writer.println("  " + title);
-            writer.println("========================================");
-            writer.println("  Generated: " + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
-            writer.println();
-
-            String sql = "SELECT app_name, SUM(duration_sec) as total_secs, COUNT(*) as sessions " +
-                         "FROM usage_log " + dateCondition + " GROUP BY app_name ORDER BY total_secs DESC";
-
-            try (Statement stmt = dbConn.createStatement();
-                 ResultSet rs = stmt.executeQuery(sql)) {
-
-                long grandTotal = 0;
-                writer.printf("%-4s %-30s %12s %10s\n", "Rank", "Application", "Duration", "Sessions");
-                writer.println(String.join("", Collections.nCopies(60, "-")));
-
-                int rank = 1;
-                while (rs.next()) {
-                    String app = rs.getString("app_name");
-                    if (shouldIgnore(app)) continue;  // skip ignored apps in report
-                    long secs = rs.getLong("total_secs");
-                    int sessions = rs.getInt("sessions");
-                    grandTotal += secs;
-                    String displayName = getFriendlyName(app);
-                    writer.printf("%-4d %-30s %12s %10d\n", rank++, displayName, formatDuration(secs), sessions);
-                }
-
-                writer.println(String.join("", Collections.nCopies(60, "-")));
-                writer.printf("%-4s %-30s %12s\n", "", "TOTAL", formatDuration(grandTotal));
-            }
-
-            System.out.println("\nReport exported to: " + reportFile.getAbsolutePath());
-
-        } catch (Exception e) {
-            System.err.println("Export failed: " + e.getMessage());
-        }
-    }
-
-    private static String getBaseDir() {
-        String baseDir = System.getProperty("user.dir");
-        File psFile = new File(baseDir, PS_SCRIPT);
-        if (!psFile.exists()) {
-            File parent = new File(baseDir).getParentFile();
-            if (parent != null && new File(parent, PS_SCRIPT).exists()) {
-                baseDir = parent.getAbsolutePath();
-            }
-        }
-        return baseDir;
-    }
-
-    private static void initDb(String baseDir) {
-        try {
-            Class.forName("org.sqlite.JDBC");
-        } catch (ClassNotFoundException e) {
-            System.err.println("SQLite JDBC driver not found: " + e.getMessage());
-            System.exit(1);
-        }
-        try {
-            new File(baseDir, DATA_DIR).mkdirs();
-            String dbPath = new File(baseDir, DATA_DIR + "/" + DB_NAME).getAbsolutePath();
-            String url = "jdbc:sqlite:" + dbPath;
-
-            dbConn = DriverManager.getConnection(url);
-            dbConn.setAutoCommit(true);
-
-            try (Statement stmt = dbConn.createStatement()) {
-                stmt.execute(
-                    "CREATE TABLE IF NOT EXISTS usage_log (" +
-                    "  id         INTEGER PRIMARY KEY AUTOINCREMENT," +
-                    "  app_name   TEXT    NOT NULL," +
-                    "  start_time TEXT    NOT NULL," +
-                    "  end_time   TEXT    NOT NULL," +
-                    "  duration_sec INTEGER NOT NULL" +
-                    ")"
-                );
-            }
-
-            currentDate = LocalDate.now().toString();
-            System.out.println("DB: " + dbPath);
-            System.out.println();
-
-        } catch (SQLException e) {
-            System.err.println("DB init failed: " + e.getMessage());
-            System.exit(1);
-        }
-    }
-
-    private static void closeDb() {
-        if (dbConn != null) {
-            try { dbConn.close(); } catch (SQLException ignored) {}
-        }
-    }
-
     private static void trackForeground(String baseDir) {
         try {
             String appName = getForegroundProcessName(baseDir);
@@ -455,35 +88,24 @@ public class AppTimeTracker {
                 checkDateChange(baseDir);
 
                 if (!appName.equals(currentApp)) {
-                    String time = LocalTime.now().format(
-                        DateTimeFormatter.ofPattern("HH:mm:ss"));
-
+                    String time = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"));
                     flushCurrentApp(baseDir);
-
                     currentApp = appName;
                     currentAppStart = Instant.now();
-                    System.out.println("[" + time + "] " + appName);
+                    System.out.println("[" + time + "] " + getFriendlyName(appName));
                 }
             } else if (currentAppStart != null) {
-                // Foreground went to ignored app 鈥?treat as switching away
                 flushCurrentApp(baseDir);
             }
-
-        } catch (Exception e) {
-            // silent
-        }
+        } catch (Exception ignored) {}
     }
 
-    /**
-     * Called when switching away from the current app.
-     * Inserts one record into SQLite.
-     */
     private static void flushCurrentApp(String baseDir) {
         if (currentAppStart == null || currentApp.isEmpty()) return;
 
         Instant end = Instant.now();
         long secs = Duration.between(currentAppStart, end).getSeconds();
-        if (secs < 1) secs = 1;  // at least 1 second
+        if (secs < 1) secs = 1;
 
         try {
             String startStr = LocalDateTime.ofInstant(currentAppStart, ZoneId.systemDefault())
@@ -500,7 +122,7 @@ public class AppTimeTracker {
                 ps.executeUpdate();
             }
 
-            System.out.println("  >> " + currentApp + " recorded: " + formatDuration(secs));
+            System.out.println("  >> " + getFriendlyName(currentApp) + " recorded: " + formatDuration(secs));
 
         } catch (SQLException e) {
             System.err.println("DB insert failed: " + e.getMessage());
@@ -508,94 +130,6 @@ public class AppTimeTracker {
 
         currentApp = "";
         currentAppStart = null;
-    }
-
-    private static String getForegroundProcessName(String baseDir) {
-        try {
-            String scriptPath = new File(baseDir, PS_SCRIPT).getAbsolutePath();
-            ProcessBuilder pb = new ProcessBuilder(
-                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                "-File", scriptPath
-            );
-            pb.redirectErrorStream(true);
-            Process process = pb.start();
-
-            BufferedReader reader = new BufferedReader(
-                new InputStreamReader(process.getInputStream()));
-            String line = reader.readLine();
-            reader.close();
-
-            process.waitFor(10, TimeUnit.SECONDS);
-            if (process.isAlive()) {
-                process.destroyForcibly();
-            }
-
-            return (line != null) ? line.trim() : null;
-
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    /**
-     * Map process names to friendly display names.
-     * Returns the friendly name if found, otherwise returns original.
-     */
-    private static String getFriendlyName(String appName) {
-        if (appName == null) return null;
-        
-        String lower = appName.toLowerCase();
-        
-        // 鸣潮 - UE4/UE5 game
-        if (lower.equals("client-win64-shipping") || lower.equals("krwebview")) {
-            return "鸣潮";
-        }
-        
-        return appName;
-    }
-
-    private static boolean shouldIgnore(String appName) {
-        if (appName == null || appName.length() < 2) return true;
-
-        // Filter out garbled/special-character titles (mostly symbols)
-        int symbolCount = 0;
-        for (char c : appName.toCharArray()) {
-            if (!Character.isLetterOrDigit(c) && c != ' ' && c != '-' && c != '_' && c != '.' && c != ':') {
-                symbolCount++;
-            }
-        }
-        if (symbolCount > appName.length() / 2) return true;
-
-        String lower = appName.toLowerCase();
-        switch (lower) {
-            case "explorer":
-            case "shellexperiencehost":
-            case "searchapp":
-            case "applicationframehost":
-            case "startmenuexperiencehost":
-            case "lockapp":
-            case "system":
-            case "textinputhost":
-            case "windowsinternal":
-            case "desktopwindowmanager":
-            case "taskmgr":
-            case "windowsterminal":
-            case "windows terminal":
-            case "wt":
-            case "nexus":
-            case "nexusclient":
-            case "nexus_mod":
-                return true;
-        }
-
-        // Ignore installers, temp files, setup programs
-        if (lower.contains("setup") || lower.contains("install") || lower.contains(".tmp")
-            || lower.contains(".exe_") || lower.contains("uninst")
-            || lower.contains("wizard") || lower.contains("launcher")
-            || lower.endsWith(".tmp") || lower.endsWith(".log")) {
-            return true;
-        }
-        return false;
     }
 
     private static void checkDateChange(String baseDir) {
@@ -606,17 +140,117 @@ public class AppTimeTracker {
         }
     }
 
+    private static String getForegroundProcessName(String baseDir) {
+        try {
+            String scriptPath = new File(baseDir, PS_SCRIPT).getAbsolutePath();
+            ProcessBuilder pb = new ProcessBuilder(
+                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath);
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            String line = reader.readLine();
+            reader.close();
+
+            process.waitFor(10, TimeUnit.SECONDS);
+            if (process.isAlive()) process.destroyForcibly();
+
+            return (line != null) ? line.trim() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String getFriendlyName(String appName) {
+        if (appName == null) return null;
+        String lower = appName.toLowerCase();
+        if (lower.equals("client-win64-shipping") || lower.equals("krwebview")) {
+            return "\u9E23\u6F6E";
+        }
+        return appName;
+    }
+
+    private static boolean shouldIgnore(String appName) {
+        if (appName == null || appName.length() < 2) return true;
+
+        int symbolCount = 0;
+        for (char c : appName.toCharArray()) {
+            if (!Character.isLetterOrDigit(c) && c != ' ' && c != '-' && c != '_' && c != '.' && c != ':') {
+                symbolCount++;
+            }
+        }
+        if (symbolCount > appName.length() / 2) return true;
+
+        String lower = appName.toLowerCase();
+        switch (lower) {
+            case "explorer": case "shellexperiencehost": case "searchapp":
+            case "applicationframehost": case "startmenuexperiencehost": case "lockapp":
+            case "system": case "textinputhost": case "windowsinternal":
+            case "desktopwindowmanager": case "taskmgr": case "windowsterminal":
+            case "windows terminal": case "wt": case "nexus": case "nexusclient":
+            case "nexus_mod":
+                return true;
+        }
+        if (lower.contains("setup") || lower.contains("install") || lower.contains(".tmp")
+            || lower.contains(".exe_") || lower.contains("uninst")
+            || lower.contains("wizard") || lower.contains("launcher")
+            || lower.endsWith(".tmp") || lower.endsWith(".log")) {
+            return true;
+        }
+        return false;
+    }
+
+    private static void initDb(String baseDir) {
+        try {
+            Class.forName("org.sqlite.JDBC");
+        } catch (ClassNotFoundException e) {
+            System.err.println("SQLite JDBC driver not found: " + e.getMessage());
+            System.exit(1);
+        }
+        try {
+            new File(baseDir, DATA_DIR).mkdirs();
+            String dbPath = new File(baseDir, DATA_DIR + "/" + DB_NAME).getAbsolutePath();
+            dbConn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+            dbConn.setAutoCommit(true);
+
+            try (Statement stmt = dbConn.createStatement()) {
+                stmt.execute("CREATE TABLE IF NOT EXISTS usage_log (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, app_name TEXT NOT NULL, " +
+                    "start_time TEXT NOT NULL, end_time TEXT NOT NULL, duration_sec INTEGER NOT NULL)");
+            }
+            currentDate = LocalDate.now().toString();
+            System.out.println("DB: " + dbPath);
+            System.out.println();
+        } catch (SQLException e) {
+            System.err.println("DB init failed: " + e.getMessage());
+            System.exit(1);
+        }
+    }
+
+    private static void closeDb() {
+        if (dbConn != null) {
+            try { dbConn.close(); } catch (SQLException ignored) {}
+        }
+    }
+
+    private static String getBaseDir() {
+        String baseDir = System.getProperty("user.dir");
+        File psFile = new File(baseDir, PS_SCRIPT);
+        if (!psFile.exists()) {
+            File parent = new File(baseDir).getParentFile();
+            if (parent != null && new File(parent, PS_SCRIPT).exists()) {
+                baseDir = parent.getAbsolutePath();
+            }
+        }
+        return baseDir;
+    }
+
     private static String formatDuration(long seconds) {
         long hours = seconds / 3600;
         long minutes = (seconds % 3600) / 60;
         long secs = seconds % 60;
-
-        if (hours > 0) {
-            return hours + "h " + minutes + "m " + secs + "s";
-        } else if (minutes > 0) {
-            return minutes + "m " + secs + "s";
-        } else {
-            return secs + "s";
-        }
+        if (hours > 0) return hours + "h " + minutes + "m " + secs + "s";
+        else if (minutes > 0) return minutes + "m " + secs + "s";
+        else return secs + "s";
     }
 }
