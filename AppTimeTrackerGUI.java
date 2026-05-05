@@ -210,7 +210,7 @@ public class AppTimeTrackerGUI {
         panel.setBorder(BorderFactory.createEmptyBorder(16, 20, 12, 20));
 
         // 鈹€鈹€ Table 鈹€鈹€
-        String[] cols = {"", "\u6392\u540D", "\u5E94\u7528", "\u65F6\u957F", "\u6B21\u6570"};
+        String[] cols = {"\u56FE\u6807", "\u6392\u540D", "\u5E94\u7528", "\u65F6\u957F", "\u6B21\u6570"};
         tableModel = new DefaultTableModel(cols, 0) {
             public boolean isCellEditable(int r, int c) { return false; }
         };
@@ -223,11 +223,11 @@ public class AppTimeTrackerGUI {
         table.setSelectionBackground(ROW_SELECTED);
         table.setSelectionForeground(TEXT_PRIMARY);
         table.setBackground(ROW_EVEN);
-        table.setAutoResizeMode(JTable.AUTO_RESIZE_ALL_COLUMNS);
+        table.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
 
         // Column widths
         TableColumnModel cm = table.getColumnModel();
-        cm.getColumn(0).setMinWidth(52);  cm.getColumn(0).setMaxWidth(52);
+        cm.getColumn(0).setMinWidth(56);  cm.getColumn(0).setMaxWidth(56);
         cm.getColumn(1).setMinWidth(55);  cm.getColumn(1).setMaxWidth(55);
         cm.getColumn(2).setMinWidth(200);
         cm.getColumn(3).setMinWidth(120);
@@ -289,28 +289,49 @@ public class AppTimeTrackerGUI {
     }
 
     // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
-    //  Icon Handling
+    //  Icon Handling 鈥?uses ShellFolder reflection for real Windows icons
     // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
 
-    private static void cacheAppIcon(String appName, String exePath) {
-        if (appName == null || iconCache.containsKey(appName)) return;
+    private static Icon extractRealIcon(File file) {
+        // Method 1: ShellFolder (most reliable on Windows)
+        try {
+            Class<?> sfClass = Class.forName("sun.awt.shell.ShellFolder");
+            java.lang.reflect.Method getSF = sfClass.getMethod("getShellFolder", File.class);
+            Object sf = getSF.invoke(null, file);
+            java.lang.reflect.Method getIcon = sfClass.getMethod("getIcon", boolean.class);
+            Image img = (Image) getIcon.invoke(sf, true);
+            if (img != null) {
+                return new ImageIcon(img.getScaledInstance(38, 38, Image.SCALE_SMOOTH));
+            }
+        } catch (Exception ignored) {}
 
+        // Method 2: FileSystemView (fallback)
+        try {
+            javax.swing.filechooser.FileSystemView fsv =
+                javax.swing.filechooser.FileSystemView.getFileSystemView();
+            Icon sys = fsv.getSystemIcon(file);
+            if (sys != null) return scaleIcon(sys, 38, 38);
+        } catch (Exception ignored) {}
+
+        return null;
+    }
+
+    private static void cacheAppIcon(String appName, String exePath) {
+        if (appName == null) return;
+
+        Icon real = null;
+
+        // Try the exe path from PowerShell
         if (exePath != null && !exePath.isEmpty()) {
             File exe = new File(exePath);
             if (exe.exists()) {
-                try {
-                    javax.swing.filechooser.FileSystemView fsv =
-                        javax.swing.filechooser.FileSystemView.getFileSystemView();
-                    Icon sys = fsv.getSystemIcon(exe);
-                    if (sys != null) {
-                        iconCache.put(appName, scaleIcon(sys, 38, 38));
-                        return;
-                    }
-                } catch (Exception ignored) {}
+                real = extractRealIcon(exe);
+                if (real != null) { iconCache.put(appName, real); return; }
             }
         }
 
-        // Try common paths
+        // Search common install paths
+        String appLower = appName.toLowerCase();
         String[] bases = {
             System.getenv("LOCALAPPDATA"),
             System.getenv("PROGRAMFILES"),
@@ -319,17 +340,35 @@ public class AppTimeTrackerGUI {
         };
         for (String base : bases) {
             if (base == null || base.isEmpty()) continue;
-            File f = new File(base, appName + ".exe");
-            if (f.exists()) {
-                try {
-                    javax.swing.filechooser.FileSystemView fsv =
-                        javax.swing.filechooser.FileSystemView.getFileSystemView();
-                    Icon sys = fsv.getSystemIcon(f);
-                    if (sys != null) {
-                        iconCache.put(appName, scaleIcon(sys, 38, 38));
-                        return;
+
+            // Walk one level down to find matching exe (many apps are in subdirs)
+            File baseDir = new File(base);
+            if (!baseDir.isDirectory()) continue;
+
+            // First check direct match
+            File direct = new File(base, appName + ".exe");
+            if (direct.exists()) {
+                real = extractRealIcon(direct);
+                if (real != null) { iconCache.put(appName, real); return; }
+            }
+
+            // Then search one subdirectory deep for .exe matching app name
+            File[] subs = baseDir.listFiles();
+            if (subs != null) {
+                for (File sub : subs) {
+                    if (!sub.isDirectory()) continue;
+                    String subName = sub.getName().toLowerCase();
+                    if (subName.contains(appLower) || appLower.contains(subName)) {
+                        File[] exes = sub.listFiles((d, n) ->
+                            n.toLowerCase().endsWith(".exe"));
+                        if (exes != null) {
+                            for (File exe : exes) {
+                                real = extractRealIcon(exe);
+                                if (real != null) { iconCache.put(appName, real); return; }
+                            }
+                        }
                     }
-                } catch (Exception ignored) {}
+                }
             }
         }
     }
@@ -340,6 +379,33 @@ public class AppTimeTrackerGUI {
             return new ImageIcon(img.getScaledInstance(w, h, Image.SCALE_SMOOTH));
         }
         return icon;
+    }
+
+    /** Build a colored circle with first-letter initials as fallback icon. */
+    private static Icon createCircleIcon(String name) {
+        int sz = 32;
+        BufferedImage img = new BufferedImage(sz, sz, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g2 = img.createGraphics();
+        try {
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                RenderingHints.VALUE_ANTIALIAS_ON);
+
+            Color bg = Color.getHSBColor(
+                Math.abs(name.hashCode()) % 360 / 360f, 0.55f, 0.80f);
+            g2.setColor(bg);
+            g2.fillOval(0, 0, sz, sz);
+
+            g2.setColor(Color.WHITE);
+            g2.setFont(new Font("SansSerif", Font.BOLD, 13));
+            String letter = name.substring(0, 1).toUpperCase();
+            FontMetrics fm = g2.getFontMetrics();
+            int tx = (sz - fm.stringWidth(letter)) / 2;
+            int ty = (sz + fm.getAscent() - fm.getDescent()) / 2;
+            g2.drawString(letter, tx, ty);
+        } finally {
+            g2.dispose();
+        }
+        return new ImageIcon(img);
     }
 
     // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
@@ -652,75 +718,33 @@ public class AppTimeTrackerGUI {
     //  Custom Table Renderers
     // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
 
-    /** Col 0: App icon 鈥?draws colored circle with first letter. */
-    static class AppIconRenderer extends JPanel implements TableCellRenderer {
-        private String appName = "";
-        private Color circleColor = Color.GRAY;
-        private boolean isSelected = false;
-        private int rowIndex = 0;
-
+    /** Col 0: App icon 鈥?shows real system icon or colored-circle fallback. */
+    static class AppIconRenderer extends DefaultTableCellRenderer {
         AppIconRenderer() {
-            setOpaque(true);
+            setHorizontalAlignment(SwingConstants.CENTER);
+            setVerticalAlignment(SwingConstants.CENTER);
         }
 
         public Component getTableCellRendererComponent(JTable t, Object val,
                 boolean sel, boolean focus, int row, int col) {
-            appName = val != null ? val.toString() : "";
-            isSelected = sel;
-            rowIndex = row;
-            Color base = appName.isEmpty() ? ACCENT
-                : Color.getHSBColor(Math.abs(appName.hashCode()) % 360 / 360f, 0.55f, 0.78f);
-            circleColor = base;
-            int iconSize = 30;
-            // Check cache for real icon
-            Icon cached = iconCache.get(appName);
-            if (cached != null) {
-                // We'll paint it in paintComponent
-            }
-            setBackground(sel ? ROW_SELECTED : (row % 2 == 0 ? ROW_EVEN : ROW_ODD));
-            return this;
-        }
+            super.getTableCellRendererComponent(t, "", sel, focus, row, col);
+            setText(null);
 
-        @Override
-        protected void paintComponent(Graphics g) {
-            super.paintComponent(g);
-            if (appName.isEmpty()) return;
-
-            Graphics2D g2 = (Graphics2D) g.create();
-            try {
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
-                    RenderingHints.VALUE_ANTIALIAS_ON);
-
-                int size = 30;
-                int cx = (getWidth() - size) / 2;
-                int cy = (getHeight() - size) / 2;
-
-                Icon cached = iconCache.get(appName);
-                if (cached != null && cached instanceof ImageIcon) {
-                    Image img = ((ImageIcon) cached).getImage();
-                    // Center the real icon
-                    int iw = Math.min(size, cached.getIconWidth());
-                    int ih = Math.min(size, cached.getIconHeight());
-                    int ix = (getWidth() - iw) / 2;
-                    int iy = (getHeight() - ih) / 2;
-                    g2.drawImage(img, ix, iy, iw, ih, this);
+            String name = val != null ? val.toString() : "";
+            if (!name.isEmpty()) {
+                Icon cached = iconCache.get(name);
+                if (cached != null) {
+                    setIcon(cached);
                 } else {
-                    // Draw colored circle
-                    g2.setColor(circleColor);
-                    g2.fillOval(cx, cy, size, size);
-
-                    // Draw letter
-                    g2.setColor(Color.WHITE);
-                    g2.setFont(new Font("SansSerif", Font.BOLD, 13));
-                    String letter = appName.substring(0, 1).toUpperCase();
-                    FontMetrics fm = g2.getFontMetrics();
-                    int tx = (getWidth() - fm.stringWidth(letter)) / 2;
-                    int ty = cy + (size + fm.getAscent() - fm.getDescent()) / 2;
-                    g2.drawString(letter, tx, ty);
+                    setIcon(createCircleIcon(name));
                 }
-            } finally {
-                g2.dispose();
+            } else {
+                setIcon(null);
             }
+
+            if (!sel) setBackground(row % 2 == 0 ? ROW_EVEN : ROW_ODD);
+            setBorder(BorderFactory.createEmptyBorder(0, 2, 0, 2));
+            return this;
         }
     }
 
