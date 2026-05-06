@@ -293,16 +293,15 @@ public class AppTimeTrackerGUI {
     // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
 
     private static Icon extractRealIcon(File file) {
-        // Method 1: ShellFolder (most reliable on Windows)
+        // Method 1: ShellFolder.getIcon() returns Icon, NOT Image!
         try {
             Class<?> sfClass = Class.forName("sun.awt.shell.ShellFolder");
             java.lang.reflect.Method getSF = sfClass.getMethod("getShellFolder", File.class);
             Object sf = getSF.invoke(null, file);
             java.lang.reflect.Method getIcon = sfClass.getMethod("getIcon", boolean.class);
-            Image img = (Image) getIcon.invoke(sf, true);
-            if (img != null) {
-                return new ImageIcon(img.getScaledInstance(38, 38, Image.SCALE_SMOOTH));
-            }
+            // ShellFolder returns javax.swing.Icon (ImageIcon), not java.awt.Image
+            Icon icon = (Icon) getIcon.invoke(sf, true);
+            if (icon != null) return scaleIcon(icon, 38, 38);
         } catch (Exception ignored) {}
 
         // Method 2: FileSystemView (fallback)
@@ -379,6 +378,89 @@ public class AppTimeTrackerGUI {
             return new ImageIcon(img.getScaledInstance(w, h, Image.SCALE_SMOOTH));
         }
         return icon;
+    }
+
+    // 异步加载缺失图标，避免阻塞UI
+    private static void preloadMissingIcons(java.util.List<String> appNames, String baseDir) {
+        for (String name : appNames) {
+            if (!iconCache.containsKey(name)) {
+                new Thread(() -> {
+                    // 从注册表查找 exe 路径
+                    String exePath = findExePath(name);
+                    cacheAppIcon(name, exePath);
+                    // 通知表格刷新图标
+                    SwingUtilities.invokeLater(() -> {
+                        tableModel.fireTableDataChanged();
+                    });
+                }, "IconLoad-" + name).start();
+            }
+        }
+    }
+
+    // 通过注册表查找应用的 exe 路径
+    private static String findExePath(String appName) {
+        // 常用应用映射
+        java.util.Map<String, String> knownPaths = new java.util.HashMap<>();
+        knownPaths.put("Microsoft Edge", "msedge.exe");
+        knownPaths.put("Google Chrome", "chrome.exe");
+        knownPaths.put("微信", "WeChat.exe");
+        knownPaths.put("QQ", "QQ.exe");
+        knownPaths.put("钉钉", "DingTalk.exe");
+        knownPaths.put("网易云音乐", "cloudmusic.exe");
+        knownPaths.put("Visual Studio Code", "Code.exe");
+        knownPaths.put("Notepad++", "notepad++.exe");
+        knownPaths.put("File Explorer", "explorer.exe");
+        knownPaths.put("Task Manager", "Taskmgr.exe");
+
+        String exe = knownPaths.get(appName);
+        if (exe == null) {
+            // 尝试将 appName 转为 exe 名（首字母大写）
+            String base = appName.replaceAll("[^a-zA-Z0-9]", "");
+            if (!base.isEmpty()) {
+                exe = base.substring(0, 1).toUpperCase() + base.substring(1) + ".exe";
+            }
+        }
+
+        if (exe != null) {
+            // 在 Start Menu 快捷方式中搜索
+            String[] searchRoots = {
+                System.getenv("APPDATA") + "\\Microsoft\\Windows\\Start Menu\\Programs",
+                "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+                System.getenv("LOCALAPPDATA"),
+                System.getenv("PROGRAMFILES"),
+                System.getenv("PROGRAMFILES(X86)")
+            };
+
+            for (String root : searchRoots) {
+                if (root == null) continue;
+                File r = new File(root);
+                if (!r.isDirectory()) continue;
+
+                File result = searchForExe(r, exe, 4);
+                if (result != null && result.exists()) {
+                    return result.getAbsolutePath();
+                }
+            }
+        }
+        return "";
+    }
+
+    // 递归搜索 exe 文件
+    private static File searchForExe(File dir, String exeName, int maxDepth) {
+        if (maxDepth <= 0 || !dir.isDirectory()) return null;
+        File[] children = dir.listFiles();
+        if (children == null) return null;
+
+        for (File f : children) {
+            if (f.isFile() && f.getName().equalsIgnoreCase(exeName)) {
+                return f;
+            }
+            if (f.isDirectory()) {
+                File found = searchForExe(f, exeName, maxDepth - 1);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     /** Build a colored circle with first-letter initials as fallback icon. */
@@ -460,6 +542,7 @@ public class AppTimeTrackerGUI {
 
             tableModel.setRowCount(0);
             java.util.List<Object[]> chartData = new ArrayList<>();
+            java.util.List<String> appNamesForIconPreload = new ArrayList<>();
             int rank = 1;
             long grandTotal = 0;
 
@@ -472,6 +555,7 @@ public class AppTimeTrackerGUI {
                 grandTotal += secs;
 
                 String disp = getFriendlyName(app);
+                appNamesForIconPreload.add(disp);
                 // Store display name in col 0 (used by AppIconRenderer)
                 tableModel.addRow(new Object[]{
                     disp, rank++, disp, formatDuration(secs), sess
@@ -480,6 +564,9 @@ public class AppTimeTrackerGUI {
             }
             rs.close();
             ps.close();
+
+            // 异步加载缺失图标（为所有出现在结果中的应用加载图标）
+            preloadMissingIcons(appNamesForIconPreload, baseDir);
 
             chartPanel.setData(chartData);
 
@@ -843,7 +930,11 @@ public class AppTimeTrackerGUI {
                     RenderingHints.VALUE_ANTIALIAS_ON);
 
                 int w = getWidth(), h = getHeight();
-                int pad = 60;
+                int pad = 30;
+                int nameW = 150;       // fixed space for app names on left
+                int durW = 90;          // fixed space for durations on right
+                int barStart = pad + nameW + 16;
+                int barArea = w - barStart - durW - pad;
                 int usableH = h - pad * 2;
 
                 long maxVal = 1;
@@ -865,35 +956,42 @@ public class AppTimeTrackerGUI {
                 int gap = 10;
                 int startY = pad + 10;
 
+                Font nameFont = new Font("SansSerif", Font.PLAIN, 13);
+                Font durFont = new Font("SansSerif", Font.PLAIN, 13);
+
                 for (int i = 0; i < n; i++) {
                     Object[] row = data.get(i);
                     String name = (String) row[0];
                     long val = (Long) row[1];
-                    int barW = (int) ((double) val / maxVal * (w - pad * 2 - 220));
+                    int barW = (int) ((double) val / maxVal * barArea);
                     barW = Math.max(barW, 8);
 
                     int y = startY + i * (barH + gap);
                     Color c = palette[i % palette.length];
 
+                    // App name — fixed left position, vertically centered
+                    g2.setFont(nameFont);
+                    g2.setColor(TEXT_PRIMARY);
+                    FontMetrics fm = g2.getFontMetrics();
+                    String label = name.length() > 10 ? name.substring(0, 9) + ".." : name;
+                    int textY = y + (barH + fm.getAscent() - fm.getDescent()) / 2;
+                    g2.drawString(label, pad, textY);
+
                     // Gradient bar
                     GradientPaint grad = new GradientPaint(
-                        pad, y, new Color(c.getRed(), c.getGreen(), c.getBlue(), 220),
-                        pad + 8, y, c);
+                        barStart, y, new Color(c.getRed(), c.getGreen(), c.getBlue(), 150),
+                        barStart + 8, y, c);
                     g2.setPaint(grad);
-                    g2.fillRoundRect(pad, y, barW, barH, 8, 8);
+                    g2.fillRoundRect(barStart, y, barW, barH, 8, 8);
                     g2.setColor(c);
-                    g2.drawRoundRect(pad, y, barW, barH, 8, 8);
+                    g2.drawRoundRect(barStart, y, barW, barH, 8, 8);
 
-                    // Label
-                    g2.setColor(TEXT_PRIMARY);
-                    g2.setFont(new Font("SansSerif", Font.PLAIN, 13));
-                    String label = name.length() > 16 ? name.substring(0, 14) + ".." : name;
-                    g2.drawString(label, pad + barW + 14, y + barH - 10);
-
-                    // Value
+                    // Duration — fixed right position, vertically centered
+                    g2.setFont(durFont);
                     g2.setColor(TEXT_SECONDARY);
-                    g2.drawString(formatDuration(val),
-                        pad + barW + 14 + 180, y + barH - 10);
+                    String dur = formatDuration(val);
+                    int durStrW = fm.stringWidth(dur);
+                    g2.drawString(dur, w - pad - durStrW, textY);
                 }
             } finally {
                 g2.dispose();
