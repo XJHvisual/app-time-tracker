@@ -261,7 +261,7 @@ public class AppTimeTrackerGUI {
 
         // 鈹€鈹€ Chart 鈹€鈹€
         chartPanel = new BarChartPanel();
-        chartPanel.setPreferredSize(new Dimension(0, 200));
+        chartPanel.setPreferredSize(new Dimension(0, 280));
         chartPanel.setBackground(Color.WHITE);
         chartPanel.setBorder(BorderFactory.createMatteBorder(0, 1, 1, 1,
             new Color(222, 228, 234)));
@@ -931,7 +931,7 @@ public class AppTimeTrackerGUI {
 
                 int w = getWidth(), h = getHeight();
                 int pad = 30;
-                int nameW = 150;       // fixed space for app names on left
+                int nameW = 170;       // fixed space for app names on left
                 int durW = 90;          // fixed space for durations on right
                 int barStart = pad + nameW + 16;
                 int barArea = w - barStart - durW - pad;
@@ -952,12 +952,12 @@ public class AppTimeTrackerGUI {
                 };
 
                 int n = Math.min(data.size(), 8);
-                int barH = Math.min(32, (usableH - (n - 1) * 10) / n);
-                int gap = 10;
+                int gap = 20;
+                int barH = Math.max(44, (usableH - (n - 1) * gap) / n);
                 int startY = pad + 10;
 
-                Font nameFont = new Font("SansSerif", Font.PLAIN, 13);
-                Font durFont = new Font("SansSerif", Font.PLAIN, 13);
+                Font nameFont = new Font("SansSerif", Font.PLAIN, 16);
+                Font durFont = new Font("SansSerif", Font.PLAIN, 15);
 
                 for (int i = 0; i < n; i++) {
                     Object[] row = data.get(i);
