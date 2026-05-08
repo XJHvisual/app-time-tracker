@@ -356,59 +356,65 @@ public class AppTimeTrackerGUI {
 
     private static void cacheAppIcon(String appName, String exePath) {
         if (appName == null) return;
+        if (iconCache.containsKey(appName)) return;
 
-        Icon real = null;
+        Map<String, String> exeMap = new HashMap<>();
+        exeMap.put("Google Chrome", "chrome.exe");
+        exeMap.put("Microsoft Edge", "msedge.exe");
+        exeMap.put("javaw", "javaw.exe");
+        exeMap.put("Task Manager", "Taskmgr.exe");
+        exeMap.put("File Explorer", "explorer.exe");
 
-        // Try the exe path from PowerShell
-        if (exePath != null && !exePath.isEmpty()) {
-            File exe = new File(exePath);
-            if (exe.exists()) {
-                real = extractRealIcon(exe);
-                if (real != null) { iconCache.put(appName, real); return; }
-            }
+        String exeName = exeMap.get(appName);
+        if (exeName == null) {
+            exeName = appName.toLowerCase().replaceAll("[^a-zA-Z0-9]", "") + ".exe";
         }
 
-        // Search common install paths
-        String appLower = appName.toLowerCase();
-        String[] bases = {
-            System.getenv("LOCALAPPDATA"),
-            System.getenv("PROGRAMFILES"),
-            System.getenv("PROGRAMFILES(X86)"),
-            System.getenv("SystemRoot") + "\\System32"
-        };
-        for (String base : bases) {
-            if (base == null || base.isEmpty()) continue;
+        Map<String, String[]> knownPaths = new HashMap<>();
+        knownPaths.put("chrome.exe", new String[]{
+            System.getenv("PROGRAMFILES") + "\\Google\\Chrome\\Application\\chrome.exe",
+            System.getenv("PROGRAMFILES(X86)") + "\\Google\\Chrome\\Application\\chrome.exe"
+        });
+        knownPaths.put("msedge.exe", new String[]{
+            System.getenv("PROGRAMFILES(X86)") + "\\Microsoft\\Edge\\Application\\msedge.exe",
+            System.getenv("PROGRAMFILES") + "\\Microsoft\\Edge\\Application\\msedge.exe"
+        });
+        knownPaths.put("javaw.exe", new String[]{
+            System.getenv("JAVA_HOME") + "\\bin\\javaw.exe",
+            "C:\\Program Files\\Zulu\\zulu-24\\bin\\javaw.exe"
+        });
+        knownPaths.put("Taskmgr.exe", new String[]{ System.getenv("SystemRoot") + "\\System32\\Taskmgr.exe" });
+        knownPaths.put("explorer.exe", new String[]{ System.getenv("SystemRoot") + "\\explorer.exe" });
 
-            // Walk one level down to find matching exe (many apps are in subdirs)
-            File baseDir = new File(base);
-            if (!baseDir.isDirectory()) continue;
-
-            // First check direct match
-            File direct = new File(base, appName + ".exe");
-            if (direct.exists()) {
-                real = extractRealIcon(direct);
-                if (real != null) { iconCache.put(appName, real); return; }
-            }
-
-            // Then search one subdirectory deep for .exe matching app name
-            File[] subs = baseDir.listFiles();
-            if (subs != null) {
-                for (File sub : subs) {
-                    if (!sub.isDirectory()) continue;
-                    String subName = sub.getName().toLowerCase();
-                    if (subName.contains(appLower) || appLower.contains(subName)) {
-                        File[] exes = sub.listFiles((d, n) ->
-                            n.toLowerCase().endsWith(".exe"));
-                        if (exes != null) {
-                            for (File exe : exes) {
-                                real = extractRealIcon(exe);
-                                if (real != null) { iconCache.put(appName, real); return; }
-                            }
-                        }
+        Icon real = null;
+        String[] known = knownPaths.get(exeName);
+        if (known != null) {
+            for (String p : known) {
+                if (p != null) {
+                    File exe = new File(p);
+                    if (exe.exists()) {
+                        real = extractRealIcon(exe);
+                        if (real != null) { iconCache.put(appName, real); return; }
                     }
                 }
             }
         }
+
+        try {
+            ProcessBuilder pb = new ProcessBuilder("where.exe", exeName);
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()));
+            String line = reader.readLine();
+            p.waitFor(3, TimeUnit.SECONDS);
+            if (line != null && !line.isEmpty()) {
+                File exe = new File(line.trim());
+                if (exe.exists()) {
+                    real = extractRealIcon(exe);
+                    if (real != null) { iconCache.put(appName, real); return; }
+                }
+            }
+        } catch (Exception ignored) {}
     }
 
     private static Icon scaleIcon(Icon icon, int w, int h) {

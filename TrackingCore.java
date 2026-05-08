@@ -224,6 +224,25 @@ public class TrackingCore {
         if (name == null) return null;
         switch (name.toLowerCase()) {
             case "client-win64-shipping": case "krwebview": return "鸣潮";
+            case "msedge": return "Microsoft Edge";
+            case "chrome": return "Google Chrome";
+            case "firefox": return "Firefox";
+            case "wechat": case "weixin": return "微信";
+            case "qq": return "QQ";
+            case "dingtalk": return "钉钉";
+            case "cloudmusic": return "网易云音乐";
+            case "douyin": return "抖音";
+            case "code": return "Visual Studio Code";
+            case "notepad++": return "Notepad++";
+            case "typora": return "Typora";
+            case "cursor": return "Cursor";
+            case "steamwebhelper": return "Steam";
+            case "valorant-win64-shipping": return "VALORANT";
+            case "cs2": return "Counter-Strike 2";
+            case "wegame": return "WeGame";
+            case "wps": case "wpspdf": return "WPS Office";
+            case "mysqlworkbench": return "MySQL Workbench";
+            case "qclaw": return "QClaw";
             default: return name;
         }
     }
