@@ -1,14 +1,13 @@
 import java.io.*;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.sql.*;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 
 /**
- * Shared tracking engine — eliminates ~60% code duplication between
- * AppTimeTracker (CLI) and AppTimeTrackerGUI.
- *
- * Handles: DB init/close, background tracking loop, recording, helpers.
- * Subclasses override shouldIgnore/getFriendlyName/onAppChanged.
+ * Shared tracking engine v2.0
+ * Added: single-instance lock, heartbeat, DB health check.
  */
 public class TrackingCore {
 
@@ -18,6 +17,7 @@ public class TrackingCore {
     protected static final int SCAN_INTERVAL_SECONDS = 2;
     protected static final String DATA_DIR = "data";
     protected static final String DB_NAME = "usagelog.db";
+    protected static final String LOCK_FILE = "data/.tracker.lock";
 
     protected String currentDate = "";
     protected String currentApp = "";
@@ -25,13 +25,50 @@ public class TrackingCore {
     protected Connection dbConn = null;
     protected String baseDir;
 
+    private RandomAccessFile lockRaf = null;
+    private FileLock fileLock = null;
+    private volatile Instant lastSuccessfulFlush = null;
+
     public TrackingCore(String baseDir) {
         this.baseDir = baseDir;
     }
 
-    // ════════════════════════════════════════════════
-    //  DB
-    // ════════════════════════════════════════════════
+    // === Single Instance Lock ===
+
+    public boolean tryAcquireLock() {
+        try {
+            File lockFile = new File(baseDir, LOCK_FILE);
+            lockFile.getParentFile().mkdirs();
+            lockRaf = new RandomAccessFile(lockFile, "rw");
+            fileLock = lockRaf.getChannel().tryLock();
+            if (fileLock == null) {
+                System.err.println("[Lock] Another instance is already running. Exiting.");
+                lockRaf.close();
+                return false;
+            }
+            lockRaf.writeBytes(String.valueOf(ProcessHandle.current().pid()));
+            System.out.println("[Lock] Acquired (PID: " + ProcessHandle.current().pid() + ")");
+            return true;
+        } catch (Exception e) {
+            System.err.println("[Lock] Failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    public void releaseLock() {
+        try {
+            if (fileLock != null) fileLock.release();
+            if (lockRaf != null) lockRaf.close();
+            File lockFile = new File(baseDir, LOCK_FILE);
+            if (lockFile.exists()) lockFile.delete();
+        } catch (Exception ignored) {}
+    }
+
+    public Instant getLastSuccessfulFlush() {
+        return lastSuccessfulFlush;
+    }
+
+    // === DB ===
 
     public void initDb() {
         try { Class.forName("org.sqlite.JDBC"); }
@@ -61,9 +98,7 @@ public class TrackingCore {
 
     public String getBaseDir() { return baseDir; }
 
-    // ════════════════════════════════════════════════
-    //  Tracking loop
-    // ════════════════════════════════════════════════
+    // === Tracking loop ===
 
     public void startTracking() {
         trackingActive = true;
@@ -118,24 +153,22 @@ public class TrackingCore {
         } catch (Exception ignored) {}
     }
 
-    /** Called every scan when a valid app is in foreground. */
     protected void onAppDetected(String appName, String exePath) {}
-
-    /** Called when the foreground app changes. */
     protected void onAppChanged(String appName, String exePath) {}
-
-    /** Called after a record is flushed to DB (before clearing state). */
     protected void onFlush(long durationSec) {}
 
-    // ════════════════════════════════════════════════
-    //  Recording
-    // ════════════════════════════════════════════════
+    // === Recording ===
 
     protected void flushCurrentApp() {
         if (currentAppStart == null || currentApp.isEmpty()) return;
         Instant end = Instant.now();
         long secs = Math.max(1, Duration.between(currentAppStart, end).getSeconds());
         try {
+            // DB health check
+            if (dbConn == null || dbConn.isClosed()) {
+                System.err.println("[DB] Connection lost, reconnecting...");
+                initDb();
+            }
             String s = LocalDateTime.ofInstant(currentAppStart, ZoneId.systemDefault())
                 .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
             String e = LocalDateTime.ofInstant(end, ZoneId.systemDefault())
@@ -146,8 +179,11 @@ public class TrackingCore {
                 ps.setString(3, e);          ps.setLong(4, secs);
                 ps.executeUpdate();
             }
+            lastSuccessfulFlush = Instant.now();
             onFlush(secs);
-        } catch (SQLException ex) { System.err.println("DB: " + ex.getMessage()); }
+        } catch (SQLException ex) {
+            System.err.println("[DB] Write failed: " + ex.getMessage());
+        }
         currentApp = ""; currentAppStart = null;
     }
 
@@ -156,9 +192,7 @@ public class TrackingCore {
         if (!today.equals(currentDate)) { flushCurrentApp(); currentDate = today; }
     }
 
-    // ════════════════════════════════════════════════
-    //  Helpers
-    // ════════════════════════════════════════════════
+    // === Helpers ===
 
     public static String formatDuration(long secs) {
         if (secs < 0) secs = 0;
@@ -168,7 +202,6 @@ public class TrackingCore {
         return s + "s";
     }
 
-    /** Default: common system processes to ignore. */
     protected boolean shouldIgnore(String name) {
         if (name == null || name.isEmpty()) return true;
         String lower = name.toLowerCase();
@@ -187,7 +220,6 @@ public class TrackingCore {
         return false;
     }
 
-    /** Default friendly name mapping. */
     protected String getFriendlyName(String name) {
         if (name == null) return null;
         switch (name.toLowerCase()) {
@@ -196,11 +228,8 @@ public class TrackingCore {
         }
     }
 
-    // ════════════════════════════════════════════════
-    //  Base dir resolution
-    // ════════════════════════════════════════════════
+    // === Base dir resolution ===
 
-    /** Detect project root (handles running from dist/ subdir). */
     public static String resolveBaseDir() {
         String d = System.getProperty("user.dir");
         if (new File(d, DATA_DIR).isDirectory()) return d;

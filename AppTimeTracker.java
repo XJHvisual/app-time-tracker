@@ -2,7 +2,7 @@ import java.time.*;
 import java.time.format.DateTimeFormatter;
 
 /**
- * CLI background tracker — thin wrapper over TrackingCore.
+ * CLI background tracker with single-instance lock.
  * Auto-starts tracking on launch, runs until Ctrl+C.
  */
 public class AppTimeTracker {
@@ -44,6 +44,11 @@ public class AppTimeTracker {
             }
         };
 
+        // Single instance lock
+        if (!engine.tryAcquireLock()) {
+            System.exit(0);
+        }
+
         engine.initDb();
         engine.startTracking();
         System.out.println("[Auto] Tracking started on launch.");
@@ -53,6 +58,7 @@ public class AppTimeTracker {
             System.out.println();
             engine.stopTracking();
             engine.closeDb();
+            engine.releaseLock();
             System.out.println("Tracking stopped. Bye!");
         }));
 
