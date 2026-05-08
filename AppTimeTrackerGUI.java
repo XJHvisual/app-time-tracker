@@ -4,15 +4,13 @@ import java.awt.*;
 import java.awt.event.*;
 import java.awt.image.BufferedImage;
 import java.io.*;
-import java.nio.file.*;
 import java.sql.*;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.TimeUnit;
-
+import java.util.concurrent.*;
 /**
- * AppTimeTracker GUI v6.1
+ * AppTimeTracker GUI v7.0
  * Modern Swing GUI with app icons, visual charts, and auto-refresh.
  * Auto-starts tracking on launch.
  *
@@ -20,20 +18,14 @@ import java.util.concurrent.TimeUnit;
  */
 public class AppTimeTrackerGUI {
 
-    private static volatile boolean trackingActive = false;
-    private static Thread trackingThread = null;
-    private static final int SCAN_INTERVAL_SECONDS = 2;
-    private static final String DATA_DIR = "data";
-    private static final String DB_NAME = "usagelog.db";
-    private static final String PS_SCRIPT = "get-foreground.ps1";
-
-    private static String currentDate = "";
-    private static String currentApp = "";
-    private static Instant currentAppStart = null;
-    private static Connection dbConn = null;
+    // Tracking engine (replaces all tracking/DB state)
+    private static TrackingCore engine;
 
     // Icon cache: app_name -> Icon
     private static final Map<String, Icon> iconCache = new HashMap<>();
+
+    // Thread pool for icon background loading
+    private static final ExecutorService iconLoader = Executors.newFixedThreadPool(2);
 
     // GUI components
     private static JFrame frame;
@@ -42,7 +34,6 @@ public class AppTimeTrackerGUI {
     private static BarChartPanel chartPanel;
     private static JLabel statusLabel;
     private static String currentRange = "today";
-    private static String baseDir;
 
     // Modern color palette
     private static final Color BG_COLOR = new Color(248, 249, 250);
@@ -57,12 +48,60 @@ public class AppTimeTrackerGUI {
     private static final Color TEXT_MUTED = new Color(169, 179, 193);
 
     public static void main(String[] args) {
-        baseDir = getBaseDir();
-        initDb(baseDir);
+        // GUI-only mode: just view data, don't start tracking
+        String baseDir = TrackingCore.resolveBaseDir();
+        engine = new TrackingCore(baseDir) {
+            @Override
+            protected boolean shouldIgnore(String name) {
+                if (name == null || name.isEmpty()) return true;
+                String lower = name.toLowerCase();
+                switch (lower) {
+                    case "explorer": case "searchapp": case "lockapp":
+                    case "system": case "system idle process":
+                    case "applicationframehost": case "startmenuexperiencehost":
+                    case "shellexperiencehost": case "textinputhost":
+                    case "desktopwindowmanager": case "windowsinternal": case "idle":
+                    case "nexus": case "nexusclient": case "nexus_mod":
+                    case "windowsterminal": case "wt":
+                        return true;
+                }
+                if (lower.contains("setup") || lower.contains("install") || lower.contains("uninst")
+                    || lower.contains("wizard") || lower.endsWith(".tmp") || lower.endsWith(".log"))
+                    return true;
+                return false;
+            }
 
-        // Auto-start tracking
-        startTrackingBackground(baseDir);
-        System.out.println("[Auto] Tracking started on launch.");
+            @Override
+            protected String getFriendlyName(String name) {
+                if (name == null) return null;
+                switch (name.toLowerCase()) {
+                    case "client-win64-shipping": case "krwebview": return "鸣潮";
+                    case "msedge": return "Microsoft Edge";
+                    case "qclaw":  return "QClaw";
+                    case "chrome": return "Google Chrome";
+                    default: return name;
+                }
+            }
+
+            @Override
+            protected void onAppDetected(String appName, String exePath) {
+                String friendly = getFriendlyName(appName);
+                if (!iconCache.containsKey(friendly)) {
+                    cacheAppIcon(friendly, exePath);
+                }
+            }
+
+            @Override
+            protected void onAppChanged(String appName, String exePath) {
+                // GUI mode: no tracking, just refresh data
+                SwingUtilities.invokeLater(() -> refreshData());
+            }
+        };
+
+        // 只初始化DB，不启动追踪（只读模式）
+        engine.initDb();
+        System.out.println("[GUI] Viewer mode - tracking runs separately");
+        System.out.println("[GUI] Run AppTimeTracker.exe to start background tracking");
 
         // Create GUI on Swing thread
         SwingUtilities.invokeLater(() -> createAndShowGUI());
@@ -86,8 +125,8 @@ public class AppTimeTrackerGUI {
 
         frame.addWindowListener(new WindowAdapter() {
             public void windowClosing(WindowEvent e) {
-                stopTracking(baseDir);
-                closeDb();
+                // GUI mode doesn't own tracking — just close
+                engine.closeDb();
                 System.exit(0);
             }
         });
@@ -105,7 +144,7 @@ public class AppTimeTrackerGUI {
 
         refreshData();
 
-        javax.swing.Timer timer = new javax.swing.Timer(5000, e -> refreshData());
+        javax.swing.Timer timer = new javax.swing.Timer(10000, e -> refreshData());
         timer.start();
     }
 
@@ -275,7 +314,7 @@ public class AppTimeTrackerGUI {
         bar.setBackground(new Color(240, 242, 245));
         bar.setBorder(BorderFactory.createEmptyBorder(10, 20, 10, 20));
 
-        statusLabel = new JLabel("\u8DDF\u8E2A\u4E2D");
+        statusLabel = new JLabel("查看模式");
         statusLabel.setFont(new Font("SansSerif", Font.PLAIN, 12));
         statusLabel.setForeground(TEXT_SECONDARY);
         bar.add(statusLabel, BorderLayout.WEST);
@@ -374,17 +413,33 @@ public class AppTimeTrackerGUI {
 
     private static Icon scaleIcon(Icon icon, int w, int h) {
         if (icon instanceof ImageIcon) {
-            Image img = ((ImageIcon) icon).getImage();
-            return new ImageIcon(img.getScaledInstance(w, h, Image.SCALE_SMOOTH));
+            Image src = ((ImageIcon) icon).getImage();
+            int sw = src.getWidth(null);
+            int sh = src.getHeight(null);
+            // Use Graphics2D with high-quality rendering hints for crisp scaling
+            java.awt.image.BufferedImage bi = new java.awt.image.BufferedImage(
+                w, h, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+            java.awt.Graphics2D g = bi.createGraphics();
+            g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+                java.awt.RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+            g.setRenderingHint(java.awt.RenderingHints.KEY_RENDERING,
+                java.awt.RenderingHints.VALUE_RENDER_QUALITY);
+            g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING,
+                java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
+            g.setRenderingHint(java.awt.RenderingHints.KEY_TEXT_ANTIALIASING,
+                java.awt.RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+            g.drawImage(src, 0, 0, w, h, null);
+            g.dispose();
+            return new ImageIcon(bi);
         }
         return icon;
     }
 
     // 异步加载缺失图标，避免阻塞UI
-    private static void preloadMissingIcons(java.util.List<String> appNames, String baseDir) {
+    private static void preloadMissingIcons(java.util.List<String> appNames) {
         for (String name : appNames) {
             if (!iconCache.containsKey(name)) {
-                new Thread(() -> {
+                iconLoader.execute(() -> {
                     // 从注册表查找 exe 路径
                     String exePath = findExePath(name);
                     cacheAppIcon(name, exePath);
@@ -392,7 +447,7 @@ public class AppTimeTrackerGUI {
                     SwingUtilities.invokeLater(() -> {
                         tableModel.fireTableDataChanged();
                     });
-                }, "IconLoad-" + name).start();
+                });
             }
         }
     }
@@ -495,7 +550,7 @@ public class AppTimeTrackerGUI {
     // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
 
     private static void refreshData() {
-        if (dbConn == null) return;
+        if (engine == null || engine.getConnection() == null) return;
 
         try {
             String sql;
@@ -527,13 +582,13 @@ public class AppTimeTrackerGUI {
                 sql = "SELECT app_name,SUM(duration_sec) AS total_secs," +
                       "COUNT(*) AS sessions FROM usage_log " +
                       "GROUP BY app_name ORDER BY total_secs DESC LIMIT 20";
-                ps = dbConn.prepareStatement(sql);
+                ps = engine.getConnection().prepareStatement(sql);
             } else {
                 sql = "SELECT app_name,SUM(duration_sec) AS total_secs," +
                       "COUNT(*) AS sessions FROM usage_log " +
                       "WHERE date(start_time)>=? AND date(start_time)<=? " +
                       "GROUP BY app_name ORDER BY total_secs DESC LIMIT 20";
-                ps = dbConn.prepareStatement(sql);
+                ps = engine.getConnection().prepareStatement(sql);
                 ps.setString(1, startDate);
                 ps.setString(2, endDate);
             }
@@ -548,17 +603,17 @@ public class AppTimeTrackerGUI {
 
             while (rs.next()) {
                 String app = rs.getString("app_name");
-                if (shouldIgnore(app)) continue;
+                if (engine.shouldIgnore(app)) continue;
 
                 long secs = rs.getLong("total_secs");
                 int sess = rs.getInt("sessions");
                 grandTotal += secs;
 
-                String disp = getFriendlyName(app);
+                String disp = engine.getFriendlyName(app);
                 appNamesForIconPreload.add(disp);
                 // Store display name in col 0 (used by AppIconRenderer)
                 tableModel.addRow(new Object[]{
-                    disp, rank++, disp, formatDuration(secs), sess
+                    disp, rank++, disp, TrackingCore.formatDuration(secs), sess
                 });
                 chartData.add(new Object[]{disp, secs});
             }
@@ -566,7 +621,7 @@ public class AppTimeTrackerGUI {
             ps.close();
 
             // 异步加载缺失图标（为所有出现在结果中的应用加载图标）
-            preloadMissingIcons(appNamesForIconPreload, baseDir);
+            preloadMissingIcons(appNamesForIconPreload);
 
             chartPanel.setData(chartData);
 
@@ -579,8 +634,8 @@ public class AppTimeTrackerGUI {
             }
 
             statusLabel.setText(String.format(
-                "\u2705 \u8DDF\u8E2A\u4E2D | %s | \u603B\u65F6\u957F %s | \u66F4\u65B0 %s",
-                rangeLabel, formatDuration(grandTotal),
+                "\uD83D\uDCCB %s | \u603B\u65F6\u957F %s | \u66F4\u65B0 %s",
+                rangeLabel, TrackingCore.formatDuration(grandTotal),
                 LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
             ));
 
@@ -591,7 +646,7 @@ public class AppTimeTrackerGUI {
 
     private static void exportReport() {
         String ts = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
-        File out = new File(baseDir, DATA_DIR + "/report_" + ts + ".txt");
+        File out = new File(engine.getBaseDir(), "data/report_" + ts + ".txt");
         out.getParentFile().mkdirs();
 
         try (PrintWriter w = new PrintWriter(out, "UTF-8")) {
@@ -625,180 +680,6 @@ public class AppTimeTrackerGUI {
                 "\u5BFC\u51FA\u5931\u8D25: " + e.getMessage(),
                 "\u9519\u8BEF", JOptionPane.ERROR_MESSAGE);
         }
-    }
-
-    // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
-    //  Tracking Logic
-    // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
-
-    private static void startTrackingBackground(String baseDir) {
-        trackingActive = true;
-        trackingThread = new Thread(() -> {
-            while (trackingActive) {
-                try { trackForeground(baseDir);
-                      Thread.sleep(SCAN_INTERVAL_SECONDS * 1000); }
-                catch (InterruptedException e) { break; }
-            }
-            flushCurrentApp(baseDir);
-        }, "Track");
-        trackingThread.setDaemon(true);
-        trackingThread.start();
-    }
-
-    private static void stopTracking(String baseDir) {
-        trackingActive = false;
-        if (trackingThread != null && trackingThread.isAlive()) {
-            try { trackingThread.join(3000); }
-            catch (InterruptedException ignored) {}
-        }
-        flushCurrentApp(baseDir);
-    }
-
-    private static void trackForeground(String baseDir) {
-        try {
-            String[] info = getForegroundProcessInfo(baseDir);
-            if (info == null) return;
-
-            String app = info[0];
-            String path = info.length > 1 ? info[1] : "";
-            String friendly = getFriendlyName(app);
-
-            if (app == null || shouldIgnore(app)) {
-                if (currentAppStart != null) flushCurrentApp(baseDir);
-                return;
-            }
-
-            // Cache icon
-            if (!iconCache.containsKey(friendly)) {
-                cacheAppIcon(friendly, path);
-            }
-
-            checkDateChange(baseDir);
-
-            if (!app.equals(currentApp)) {
-                flushCurrentApp(baseDir);
-                currentApp = app;
-                currentAppStart = Instant.now();
-                System.out.printf("[%s] %s\n",
-                    LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")),
-                    friendly);
-            }
-        } catch (Exception ignored) {}
-    }
-
-    private static String[] getForegroundProcessInfo(String baseDir) {
-        try {
-            String script = new File(baseDir, PS_SCRIPT).getAbsolutePath();
-            Process p = new ProcessBuilder(
-                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script)
-                .redirectErrorStream(true).start();
-            BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
-            String line = r.readLine(); r.close();
-            p.waitFor(10, TimeUnit.SECONDS);
-            if (p.isAlive()) p.destroyForcibly();
-            if (line == null) return null;
-            line = line.trim();
-            int idx = line.indexOf('|');
-            if (idx >= 0) return new String[]{line.substring(0, idx), line.substring(idx + 1)};
-            return new String[]{line, ""};
-        } catch (Exception e) { return null; }
-    }
-
-    private static void flushCurrentApp(String baseDir) {
-        if (currentAppStart == null || currentApp.isEmpty()) return;
-        Instant end = Instant.now();
-        long secs = Math.max(1, Duration.between(currentAppStart, end).getSeconds());
-        try {
-            String s = LocalDateTime.ofInstant(currentAppStart, ZoneId.systemDefault())
-                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-            String e = LocalDateTime.ofInstant(end, ZoneId.systemDefault())
-                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-            try (PreparedStatement ps = dbConn.prepareStatement(
-                    "INSERT INTO usage_log(app_name,start_time,end_time,duration_sec) VALUES(?,?,?,?)")) {
-                ps.setString(1, currentApp); ps.setString(2, s);
-                ps.setString(3, e);          ps.setLong(4, secs);
-                ps.executeUpdate();
-            }
-        } catch (SQLException ex) { System.err.println("DB: " + ex.getMessage()); }
-        currentApp = ""; currentAppStart = null;
-    }
-
-    private static void checkDateChange(String baseDir) {
-        String today = LocalDate.now().toString();
-        if (!today.equals(currentDate)) { flushCurrentApp(baseDir); currentDate = today; }
-    }
-
-    private static void initDb(String baseDir) {
-        try { Class.forName("org.sqlite.JDBC"); }
-        catch (ClassNotFoundException e) { System.err.println("SQLite driver missing"); System.exit(1); }
-        try {
-            new File(baseDir, DATA_DIR).mkdirs();
-            String dbPath = new File(baseDir, DATA_DIR + "/" + DB_NAME).getAbsolutePath();
-            dbConn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
-            dbConn.setAutoCommit(true);
-            try (Statement s = dbConn.createStatement()) {
-                s.execute("CREATE TABLE IF NOT EXISTS usage_log (" +
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT, app_name TEXT NOT NULL, " +
-                    "start_time TEXT NOT NULL, end_time TEXT NOT NULL, duration_sec INTEGER NOT NULL)");
-            }
-            currentDate = LocalDate.now().toString();
-            System.out.println("DB: " + dbPath);
-        } catch (SQLException e) { System.err.println("DB init: " + e.getMessage()); System.exit(1); }
-    }
-
-    private static void closeDb() {
-        try { if (dbConn != null) dbConn.close(); } catch (SQLException ignored) {}
-    }
-
-    private static String getBaseDir() {
-        String d = System.getProperty("user.dir");
-        File f = new File(d, PS_SCRIPT);
-        if (!f.exists()) {
-            File p = new File(d).getParentFile();
-            if (p != null && new File(p, PS_SCRIPT).exists()) d = p.getAbsolutePath();
-        }
-        return d;
-    }
-
-    // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
-    //  Helpers
-    // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
-
-    private static String getFriendlyName(String name) {
-        if (name == null) return null;
-        switch (name.toLowerCase()) {
-            case "client-win64-shipping": case "krwebview": return "\u9E23\u6F6E";
-            case "msedge": return "Microsoft Edge";
-            case "qclaw":  return "QClaw";
-            case "chrome": return "Google Chrome";
-            default: return name;
-        }
-    }
-
-    private static boolean shouldIgnore(String name) {
-        if (name == null || name.isEmpty()) return true;
-        String lower = name.toLowerCase();
-        switch (lower) {
-            case "explorer": case "searchapp": case "lockapp":
-            case "system": case "system idle process":
-            case "applicationframehost": case "startmenuexperiencehost":
-            case "shellexperiencehost": case "textinputhost":
-            case "desktopwindowmanager": case "windowsinternal": case "idle":
-            case "windowsterminal": case "wt":
-                return true;
-        }
-        if (lower.contains("setup") || lower.contains("install") || lower.contains("uninst")
-            || lower.contains("wizard") || lower.endsWith(".tmp") || lower.endsWith(".log"))
-            return true;
-        return false;
-    }
-
-    private static String formatDuration(long secs) {
-        if (secs < 0) secs = 0;
-        long h = secs / 3600, m = (secs % 3600) / 60, s = secs % 60;
-        if (h > 0) return String.format("%dh %dm %ds", h, m, s);
-        if (m > 0) return String.format("%dm %ds", m, s);
-        return s + "s";
     }
 
     // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
@@ -989,8 +870,9 @@ public class AppTimeTrackerGUI {
                     // Duration — fixed right position, vertically centered
                     g2.setFont(durFont);
                     g2.setColor(TEXT_SECONDARY);
-                    String dur = formatDuration(val);
-                    int durStrW = fm.stringWidth(dur);
+                    String dur = TrackingCore.formatDuration(val);
+                    FontMetrics durFm = g2.getFontMetrics();
+                    int durStrW = durFm.stringWidth(dur);
                     g2.drawString(dur, w - pad - durStrW, textY);
                 }
             } finally {
