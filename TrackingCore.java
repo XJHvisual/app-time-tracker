@@ -206,16 +206,21 @@ public class TrackingCore {
         if (name == null || name.isEmpty()) return true;
         String lower = name.toLowerCase();
         switch (lower) {
+            // Windows system processes
             case "explorer": case "searchapp": case "lockapp":
-            case "system": case "system idle process":
+            case "system": case "system idle process": case "idle":
             case "applicationframehost": case "startmenuexperiencehost":
             case "shellexperiencehost": case "textinputhost":
-            case "desktopwindowmanager": case "windowsinternal": case "idle":
-            case "nexus":
+            case "desktopwindowmanager": case "windowsinternal":
+            // Task Manager & Terminal
+            case "taskmgr": case "windowsterminal": case "windows terminal": case "wt":
+            // Nexus / mod launchers
+            case "nexus": case "nexusclient": case "nexus_mod":
                 return true;
         }
         if (lower.contains("setup") || lower.contains("install") || lower.contains("uninst")
-            || lower.contains("wizard") || lower.endsWith(".tmp") || lower.endsWith(".log"))
+            || lower.contains("wizard") || lower.contains("launcher")
+            || lower.contains(".exe_") || lower.endsWith(".tmp") || lower.endsWith(".log"))
             return true;
         return false;
     }

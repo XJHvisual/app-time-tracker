@@ -11,28 +11,6 @@ public class AppTimeTracker {
         String baseDir = TrackingCore.resolveBaseDir();
         TrackingCore engine = new TrackingCore(baseDir) {
             @Override
-            protected boolean shouldIgnore(String name) {
-                if (name == null || name.isEmpty()) return true;
-                String lower = name.toLowerCase();
-                switch (lower) {
-                    case "explorer": case "shellexperiencehost": case "searchapp":
-                    case "applicationframehost": case "startmenuexperiencehost": case "lockapp":
-                    case "system": case "textinputhost": case "windowsinternal":
-                    case "desktopwindowmanager": case "taskmgr": case "windowsterminal":
-                    case "windows terminal": case "wt": case "nexus": case "nexusclient":
-                    case "nexus_mod":
-                        return true;
-                }
-                if (lower.contains("setup") || lower.contains("install") || lower.contains(".tmp")
-                    || lower.contains(".exe_") || lower.contains("uninst")
-                    || lower.contains("wizard") || lower.contains("launcher")
-                    || lower.endsWith(".tmp") || lower.endsWith(".log")) {
-                    return true;
-                }
-                return false;
-            }
-
-            @Override
             protected void onAppChanged(String appName, String exePath) {
                 String time = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"));
                 System.out.println("[" + time + "] " + getFriendlyName(appName));
