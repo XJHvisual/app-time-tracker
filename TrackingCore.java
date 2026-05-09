@@ -129,6 +129,20 @@ public class TrackingCore {
         } catch (InterruptedException ignored) {}
     }
 
+    // Desktop managers that create fullscreen overlays and block detection
+    private static final String[] DESKTOP_MANAGERS = {
+        "nexus", "nexdock", "rainmeter", "wallpaper", "lively"
+    };
+
+    private boolean isDesktopManager(String name) {
+        if (name == null) return false;
+        String lower = name.toLowerCase();
+        for (String dm : DESKTOP_MANAGERS) {
+            if (lower.contains(dm)) return true;
+        }
+        return false;
+    }
+
     protected void trackForeground() {
         try {
             String[] info = ForegroundDetector.detect();
@@ -138,6 +152,12 @@ public class TrackingCore {
             }
             String app = info[0];
             String path = info.length > 1 ? info[1] : "";
+            
+            // Desktop manager detected: continue timing current app, don't flush
+            if (isDesktopManager(app)) {
+                return;
+            }
+            
             if (shouldIgnore(app)) {
                 if (currentAppStart != null) flushCurrentApp();
                 return;
@@ -215,7 +235,7 @@ public class TrackingCore {
             // Task Manager & Terminal
             case "taskmgr": case "windowsterminal": case "windows terminal": case "wt":
             // Nexus / mod launchers
-            case "nexus": case "nexusclient": case "nexus_mod":
+            case "nexusclient": case "nexus_mod":
                 return true;
         }
         if (lower.contains("setup") || lower.contains("install") || lower.contains("uninst")

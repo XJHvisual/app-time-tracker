@@ -3,8 +3,8 @@ import com.sun.jna.ptr.IntByReference;
 import java.util.Optional;
 
 /**
- * JNA-based foreground window detection.
- * Note: Desktop managers like Nexus may interfere with detection.
+ * JNA-based foreground window detection — replaces get-foreground.ps1.
+ * Eliminates ~200-500ms PowerShell startup overhead per scan cycle.
  */
 public class ForegroundDetector {
 
@@ -14,6 +14,11 @@ public class ForegroundDetector {
         int GetWindowThreadProcessId(Pointer hWnd, IntByReference lpdwProcessId);
     }
 
+    /**
+     * Returns [processName, exePath] or null if detection fails.
+     * processName = executable name without .exe (e.g. "chrome", "msedge").
+     * exePath     = full path to the executable (may be empty).
+     */
     public static String[] detect() {
         try {
             IntByReference pidRef = new IntByReference();
@@ -23,8 +28,11 @@ public class ForegroundDetector {
             int pid = pidRef.getValue();
             if (pid <= 0) return null;
 
+            // Use ProcessHandle (Java 9+) to get exe path
             Optional<ProcessHandle> ph = ProcessHandle.of(pid);
             String cmd = ph.flatMap(h -> h.info().command()).orElse("");
+
+            // Extract process name from path (e.g. "C:\...\chrome.exe" → "chrome")
             String name = extractProcessName(cmd);
             return new String[]{name, cmd};
         } catch (Throwable t) {
